@@ -165,6 +165,8 @@ pip install -r requirements.txt
 
 ## 👥 Team
 
+> Add your team member names and GitHub handles here
+
 ---
 
 *City of Syracuse Datathon 2026 | Track 3 — Urban Data Analysis*
