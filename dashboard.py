@@ -1,36 +1,27 @@
 import streamlit as st
-from streamlit_folium import st_folium
-import plotly.express as px
-import plotly.graph_objects as go
-from crime_unfit_analysis import (
-    load_data, get_kpis,
-    fig_top_crimes, fig_qol_pie, fig_crime_by_month,
-    fig_crime_by_hour, fig_near_vs_not,
-    fig_unfit_by_year, fig_open_closed_pie,
-    fig_unfit_by_zip, fig_open_by_zip,
-    fig_vacant_by_neighborhood, fig_vacant_active_pie,
-    fig_vacant_by_zip, fig_vacant_active_by_zip,
-    fig_decay_by_zip, fig_decay_zone_crimes,
-    fig_crime_type_by_decay_zone, get_proximity_stats,
-    run_granger_causality, fig_granger_pvalues, fig_granger_timeseries,
-    run_granger_causality_cv, fig_granger_cv_pvalues, fig_granger_cv_timeseries,
-    get_violation_time_series,
-    run_random_forest, fig_rf_feature_importance,
-    fig_rf_confusion_matrix, fig_rf_metrics,
-    classify_neighborhoods, get_economic_abandonment_zones,
-    fig_zone_type_breakdown, fig_risk_score_ranking,
-    fig_crime_vs_decay_scatter, fig_economic_abandonment,
-    build_map, fig_prediction
+from analysis.crime import load_crime
+from analysis.unfit import load_unfit, get_unfit_clean
+from analysis.vacant import load_vacant
+from analysis.code_violations import load_code_violations, add_violation_features
+from analysis.decay_index import (
+    build_decay_index, run_spatial_joins, assign_crime_zip
 )
+import tabs.tab_crime           as tab_crime
+import tabs.tab_unfit           as tab_unfit
+import tabs.tab_vacant          as tab_vacant
+import tabs.tab_decay_index     as tab_decay_index
+import tabs.tab_code_violations as tab_code_violations
+import tabs.tab_map             as tab_map
+import tabs.tab_prediction      as tab_prediction
 
-# ── Page Config ────────────────────────────────────────────────────────────────
+# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="CityUnmasked — Syracuse Urban Analysis",
     page_icon="🏙️",
     layout="wide"
 )
 
-# ── Custom CSS ─────────────────────────────────────────────────────────────────
+# ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .metric-card {
@@ -57,47 +48,40 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Load Data ──────────────────────────────────────────────────────────────────
-crime, crime_2024, unfit, unfit_clean, vacant, decay, cv = load_data()
 
-# ── Cached heavy computations ──────────────────────────────────────────────────
+# ── Load all data (cached) ─────────────────────────────────────────────────────
 @st.cache_data
-def get_classification(_crime_2024, _decay, _unfit):
-    return classify_neighborhoods(_crime_2024, _decay, _unfit)
+def load_all():
+    crime = load_crime()
+    unfit = load_unfit()
+    unfit_clean = get_unfit_clean(unfit)
+    vacant = load_vacant()
+    cv = load_code_violations()
+    decay = build_decay_index(unfit_clean, vacant)
+    crime = run_spatial_joins(crime, unfit_clean, vacant)
+    crime = assign_crime_zip(crime, decay)
+    crime = add_violation_features(crime, cv)
+    return crime, unfit, unfit_clean, vacant, cv, decay
 
-@st.cache_data
-def get_abandonment(_crime_2024, _decay):
-    return get_economic_abandonment_zones(_crime_2024, _decay)
 
-@st.cache_data
-def get_granger(_crime, _unfit):
-    return run_granger_causality(_crime, _unfit)
-
-@st.cache_data
-def get_granger_cv(_crime, _cv):
-    return run_granger_causality_cv(_crime, _cv)
-
-@st.cache_data
-def get_rf(_crime_2024):
-    return run_random_forest(_crime_2024)
+crime, unfit, unfit_clean, vacant, cv, decay = load_all()
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown("# 🏙️ CityUnmasked — Syracuse Crime & Urban Decay Analysis")
 st.markdown("**Track 3 — Urban Data Analysis | City of Syracuse Datathon 2026**")
 st.divider()
 
-# ── KPI Row ────────────────────────────────────────────────────────────────────
-kpis = get_kpis(crime_2024, unfit, vacant)
+# ── KPI row ────────────────────────────────────────────────────────────────────
 cols = st.columns(8)
 kpi_data = [
-    ("Total Crimes",          kpis["total_crimes"],    "#f97316"),
-    ("Crime Types",           kpis["crime_types"],     "#f97316"),
-    ("Unfit Properties",      kpis["total_unfit"],     "#f97316"),
-    ("Open Violations",       kpis["open_violations"], "#ef4444"),
-    ("Near Unfit (100m)",     kpis["pct_near_unfit"],  "#f97316"),
-    ("Vacant Properties",     kpis["total_vacant"],    "#3b82f6"),
-    ("Active Vacancies",      kpis["active_vacant"],   "#3b82f6"),
-    ("Near Any Decay (100m)", kpis["pct_near_decay"],  "#dc2626"),
+    ("Total Crimes",           f"{len(crime):,}",                                              "#f97316"),
+    ("Crime Types",            str(crime['CRIME_TYPE'].nunique()),                             "#f97316"),
+    ("Unfit Properties",       str(len(unfit)),                                                "#f97316"),
+    ("Open Violations",        str(int((unfit['status_type_name']=='Open').sum())),            "#ef4444"),
+    ("Near Unfit (100m)",      f"{crime['near_unfit'].mean()*100:.0f}%",                      "#f97316"),
+    ("Vacant Properties",      f"{len(vacant):,}",                                             "#3b82f6"),
+    ("Active Vacancies",       str(int(vacant['is_active'].sum())),                            "#3b82f6"),
+    ("Near Any Decay (100m)",  f"{crime['near_decay'].mean()*100:.0f}%",                      "#dc2626"),
 ]
 for col, (label, val, color) in zip(cols, kpi_data):
     with col:
@@ -120,476 +104,10 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🔮 Prediction"
 ])
 
-# ── Tab 1 — Crime Analysis ─────────────────────────────────────────────────────
-with tab1:
-    st.caption("Analyzing Syracuse crime incidents across all years — patterns by type, time, and proximity to urban decay.")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown('<div class="section-header">Top Crime Types (All Years)</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_top_crimes(crime_2024), use_container_width=True)
-        st.caption("📌 The 8 most frequently reported crime types across all years in the dataset. Longer bar = more incidents.")
-    with col2:
-        st.markdown('<div class="section-header">Serious vs Quality-of-Life Crimes</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_qol_pie(crime_2024), use_container_width=True)
-        st.caption("📌 Quality-of-life crimes are minor incidents (noise, loitering). Serious crimes include assault, robbery, and property damage. The vast majority of incidents are serious.")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.markdown('<div class="section-header">Crime by Month</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_crime_by_month(crime_2024), use_container_width=True)
-        st.caption("📌 Crime counts by month aggregated across all years. Summer months (June–August) consistently spike due to increased outdoor activity.")
-    with col4:
-        st.markdown('<div class="section-header">Crime by Hour of Day</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_crime_by_hour(crime_2024), use_container_width=True)
-        st.caption("📌 Which hours see the most crime across all years. The evening window (6pm–midnight) is consistently the most dangerous period.")
-
-    st.markdown('<div class="section-header">Crime Types: Near vs Not Near Unfit Properties (100m)</div>', unsafe_allow_html=True)
-    st.plotly_chart(fig_near_vs_not(crime_2024), use_container_width=True)
-    st.caption("📌 Each crime type is split into two bars — crimes within 100m of an unfit property (orange) vs. those that weren't (dark). If the orange bar is proportionally larger, that crime type is over-represented in decay zones.")
-    st.info("💡 **Insight:** Areas within 100m of unfit properties represent ~12% of city area but account for a disproportionate share of all crimes — roughly **2x the expected rate.**")
-
-# ── Tab 2 — Unfit Properties ───────────────────────────────────────────────────
-with tab2:
-    st.caption("Unfit properties are buildings formally cited by the city as unsafe or uninhabitable. This tab tracks the violation trend, resolution rate, and geographic concentration.")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown('<div class="section-header">Violations Filed Per Year</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_unfit_by_year(unfit), use_container_width=True)
-        st.caption("📌 How many new unfit property violations were issued each year since 2014. The sharp upward trend post-2021 means the problem is accelerating faster than the city can respond.")
-    with col2:
-        st.markdown('<div class="section-header">Open vs Closed Violations</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_open_closed_pie(unfit), use_container_width=True)
-        st.caption("📌 73% of all violations ever filed are still Open — the city is issuing citations faster than it is resolving them.")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.markdown('<div class="section-header">Total Unfit Properties by Zip</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_unfit_by_zip(unfit), use_container_width=True)
-        st.caption("📌 Which zip codes have the most unfit citations. 13204, 13205, and 13208 — Syracuse's west and south sides — consistently rank highest.")
-    with col4:
-        st.markdown('<div class="section-header">Open Violations by Zip Code</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_open_by_zip(unfit), use_container_width=True)
-        st.caption("📌 Filtered to only unresolved violations — the active problem areas where enforcement is most urgently needed right now.")
-
-    st.warning("⚠️ **Trend Alert:** Unfit violations grew **33x from 2014 to 2025**, with 73% still unresolved. Steepest acceleration began in 2022.")
-
-# ── Tab 3 — Vacant Properties ──────────────────────────────────────────────────
-with tab3:
-    st.caption("Vacant properties are registered with the city as unoccupied. With 1,615 records and 88% still active, this dataset is 6x larger than unfit properties and reveals a deeper layer of urban decay.")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown('<div class="section-header-blue">Vacancies by Neighborhood</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_vacant_by_neighborhood(vacant), use_container_width=True)
-        st.caption("📌 The 8 neighborhoods with the most vacant properties. Brighton and Northside lead — historically under-resourced areas on Syracuse's north and south sides.")
-    with col2:
-        st.markdown('<div class="section-header-blue">Active vs Resolved Vacancies</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_vacant_active_pie(vacant), use_container_width=True)
-        st.caption("📌 88% of registered vacant properties are still active — even higher than the 73% unresolved rate for unfit properties.")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.markdown('<div class="section-header-blue">Total Vacancies by Zip Code</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_vacant_by_zip(vacant), use_container_width=True)
-        st.caption("📌 13205 has 521 vacancies alone — more than double the next zip code.")
-    with col4:
-        st.markdown('<div class="section-header-blue">Active Vacancies by Zip Code</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_vacant_active_by_zip(vacant), use_container_width=True)
-        st.caption("📌 The ranking barely changes from total to active — confirming that almost nothing is getting resolved in any zip code.")
-
-    st.info("💡 **Insight:** 88% of 1,615 vacant properties remain active. Brighton, Northside, and Near Westside are the most affected neighborhoods, and their top zip codes (13205, 13204, 13208) are the same as the crime hotspots.")
-
-# ── Tab 4 — Urban Decay Index ──────────────────────────────────────────────────
-with tab4:
-    st.caption("Every zip code in Syracuse classified into one of three decay types — based on the combination of crime levels and blight levels. This is the intellectual core of the project.")
-
-    with st.expander("ℹ️ How are the three zone types defined?"):
-        st.markdown("""
-        **Type A — Crime-Blight Feedback Zone** 🔴
-        High crime AND high decay co-occurring. These neighborhoods need both problems addressed simultaneously — fixing one without the other breaks only half the cycle.
-
-        **Type B — Economic Abandonment Zone** 🔵
-        High decay but LOW crime. These properties are vacant or unfit for non-crime reasons: landlord economics failing, population loss, age deterioration, absentee ownership. Increased policing is the WRONG intervention here — these neighborhoods need investment, ownership reform, and rehabilitation funding.
-
-        **Type C — Infrastructure Decay Zone** 🟡
-        Structurally cited properties (unfit-dominant) regardless of crime level. Violations driven by age, deferred maintenance, and harsh upstate NY winters. Fast-track code enforcement and rehabilitation funding are the right tools.
-
-        **Low Risk / Monitoring** ⚫
-        Below median on both crime and decay. Monitor but no immediate intervention needed.
-
-        **Why this matters:** Showing that blight exists in LOW crime areas (Type B) is the proof of intellectual honesty — blight has multiple causes, and different causes need different solutions.
-        """)
-
-    nbr = get_classification(crime_2024, decay, unfit)
-    economic_abandoned, low_crime_zips = get_abandonment(crime_2024, decay)
-
-    # ── Zone KPIs ──
-    type_counts = nbr['zone_type'].value_counts()
-    z1, z2, z3, z4 = st.columns(4)
-    zone_kpis = [
-        ("Type A — Feedback Zones",    type_counts.get('Type A — Crime-Blight Feedback', 0), "#dc2626"),
-        ("Type B — Abandonment Zones", type_counts.get('Type B — Economic Abandonment',  0), "#3b82f6"),
-        ("Type C — Infrastructure",    type_counts.get('Type C — Infrastructure Decay',   0), "#f59e0b"),
-        ("Low Risk Zip Codes",         type_counts.get('Low Risk / Monitoring',            0), "#6b7280"),
-    ]
-    for col, (label, val, color) in zip([z1, z2, z3, z4], zone_kpis):
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value" style="color:{color}">{val}</div>
-                <div class="metric-label">{label}</div>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown("###")
-
-    st.markdown('<div class="section-header-red">Crime vs Decay — Every Zip Code Classified</div>', unsafe_allow_html=True)
-    st.plotly_chart(fig_crime_vs_decay_scatter(nbr), use_container_width=True)
-    st.caption("📌 Each dot is a zip code. Dashed lines are medians dividing the chart into four quadrants. Top-right (red) = Type A feedback zones. Dots with high decay but low crime (blue) = Type B — proof that blight exists without crime.")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown('<div class="section-header-red">Zone Type Distribution</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_zone_type_breakdown(nbr), use_container_width=True)
-        st.caption("📌 How many zip codes fall into each category. Type B zones outnumbering Type A means most blight in Syracuse is economically driven, not crime-driven.")
-    with col2:
-        st.markdown('<div class="section-header-red">Top 10 Zip Codes by Risk Score</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_risk_score_ranking(nbr), use_container_width=True)
-        st.caption("📌 Composite risk score (0–100) weighted: crime 40%, decay 35%, unresolved violations 25%. Red = Type A, needs simultaneous housing AND policing intervention.")
-
-    st.divider()
-    st.markdown("### 🔵 Economic Abandonment Zones — Blight Without Crime")
-    st.markdown(f"**{len(economic_abandoned):,} vacant properties** identified in low-crime zip codes (bottom 25% crime density). These are not crime-driven — they require investment and ownership solutions, not policing.")
-
-    econ_fig = fig_economic_abandonment(economic_abandoned)
-    if econ_fig:
-        st.plotly_chart(econ_fig, use_container_width=True)
-        st.caption("📌 Vacant properties in Syracuse's lowest-crime zip codes. Their presence proves vacancy has multiple causes — economic abandonment, population loss, and landlord failure operate independently of crime.")
-
-    st.info(f"💡 **Key finding for intellectual honesty:** {len(low_crime_zips)} zip codes have low crime but significant vacancy. These need investment programs, not enforcement.")
-
-    with st.expander("📊 Full Neighborhood Classification Table"):
-        display_cols = ['zip_code', 'zone_type', 'crime_count', 'decay_score', 'pct_unresolved', 'risk_score']
-        display_df = nbr[display_cols].copy()
-        display_df['pct_unresolved'] = (display_df['pct_unresolved'] * 100).round(1).astype(str) + '%'
-        display_df['risk_score']     = display_df['risk_score'].round(1)
-        display_df.columns = ['Zip Code', 'Zone Type', 'Crime Count', 'Decay Score', '% Unresolved', 'Risk Score']
-        st.dataframe(display_df, use_container_width=True)
-
-    st.divider()
-    st.markdown("### 📍 Spatial Proximity — Crimes within 100m of Decay Points")
-    stats = get_proximity_stats(crime_2024)
-    p1, p2, p3, p4 = st.columns(4)
-    proximity_data = [
-        ("Near Unfit Only",   stats['near_unfit_pct'],  stats['near_unfit_n'],  "#f97316"),
-        ("Near Vacant Only",  stats['near_vacant_pct'], stats['near_vacant_n'], "#3b82f6"),
-        ("Near Any Decay",    stats['near_decay_pct'],  stats['near_decay_n'],  "#dc2626"),
-        ("Near Both Types",   stats['near_both_pct'],   stats['near_both_n'],   "#7c3aed"),
-    ]
-    for col, (label, pct, n, color) in zip([p1, p2, p3, p4], proximity_data):
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value" style="color:{color}">{pct}</div>
-                <div class="metric-label">{label}<br>({n:,} crimes)</div>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown("###")
-    col3, col4 = st.columns(2)
-    with col3:
-        st.markdown('<div class="section-header-red">Urban Decay Score by Zip Code</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_decay_by_zip(decay), use_container_width=True)
-        st.caption("📌 Raw decay point count per zip, stacked by type. Orange = unfit, blue = vacant.")
-    with col4:
-        st.markdown('<div class="section-header-red">Crime Count by Decay Zone</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_decay_zone_crimes(crime_2024), use_container_width=True)
-        st.caption("📌 How many crimes fell in each proximity zone across all years. 'Near Both' has the densest concentration.")
-
-    st.markdown('<div class="section-header-red">Crime Types by Decay Zone</div>', unsafe_allow_html=True)
-    st.plotly_chart(fig_crime_type_by_decay_zone(crime_2024), use_container_width=True)
-    st.caption("📌 For the top 5 crime types, crimes are split by which decay zone they occurred in. Violent crimes clustering in 'Near Both' directly supports the problem statement.")
-
-    st.divider()
-    st.markdown("### 📈 Granger Causality — Does Decay Predict Crime?")
-    st.caption("Tests whether past unfit violation counts help predict future crime counts better than past crime alone. p < 0.05 = statistically significant.")
-
-    granger_results, ts_df, interpretation = get_granger(crime, unfit)
-    st.info(f"**Result:** {interpretation}")
-
-    if granger_results is not None:
-        gc1, gc2 = st.columns(2)
-        with gc1:
-            fig_gc = fig_granger_pvalues(granger_results)
-            if fig_gc:
-                st.plotly_chart(fig_gc, use_container_width=True)
-                st.caption("📌 Green bars below the red line = statistically significant. The lower the bar, the stronger the signal that decay predicts crime at that lag.")
-        with gc2:
-            fig_ts = fig_granger_timeseries(ts_df)
-            if fig_ts:
-                st.plotly_chart(fig_ts, use_container_width=True)
-                st.caption("📌 Monthly crime (orange) vs unfit violations (blue dotted). If the blue line visually leads the orange, it supports the Granger result.")
-
-        with st.expander("📊 Full Granger Results Table"):
-            st.dataframe(granger_results, use_container_width=True)
-
-    st.error("🔴 **Key Finding:** Type A zip codes (13204, 13205, 13208) lead on both decay score AND crime — these need simultaneous housing AND public safety intervention. Type B zones need investment, not policing.")
-
-# ── Tab 5 — Code Violations ────────────────────────────────────────────────────
-with tab5:
-    st.caption("92,790 physical decay violations across Syracuse (2017–2026), filtered to structural, systems failure, and environmental neglect violations only. Administrative violations excluded.")
-
-    with st.expander("ℹ️ What are the three violation tiers?"):
-        st.markdown("""
-        **Tier 1 — Structural / Critical** 🔴
-        Direct threats to a building's physical integrity: unfit for human occupancy citations,
-        structural member failures, stairway collapse risk, protective treatment failures.
-        These are the violations most directly linked to property abandonment.
-
-        **Tier 2 — Systems Failure** 🟠
-        Building systems that are failing: interior surface deterioration, plumbing failures,
-        broken windows and doors, electrical hazards, mechanical appliance failures,
-        pest infestation, carbon monoxide risks, lead paint hazards.
-
-        **Tier 3 — Environmental Neglect** 🟡
-        Visible signs of abandonment and neglect: overgrowth, trash and debris accumulation,
-        garbage pileup, vacant property registry violations. These are the broken windows
-        theory indicators — visible disorder that signals an area is unmonitored.
-
-        **Why only these?** Administrative violations (registration failures, permit paperwork,
-        business certifications) were excluded because they do not reflect physical decay.
-        Only violations that indicate a building or property is physically deteriorating were kept.
-        """)
-
-    # ── KPIs ──
-    vts = get_violation_time_series(cv)
-    cv_k1, cv_k2, cv_k3, cv_k4 = st.columns(4)
-    cv_kpi_data = [
-        ("Total Physical Violations", f"{len(cv):,}",                                          "#dc2626"),
-        ("Still Open",                f"{cv['is_open'].sum():,} ({cv['is_open'].mean()*100:.0f}%)", "#f97316"),
-        ("Structural / Critical",     f"{(cv['tier']==3).sum():,}",                             "#dc2626"),
-        ("Years of Data",             f"{cv['year'].min()}–{cv['year'].max()}",                 "#6b7280"),
-    ]
-    for col, (label, val, color) in zip([cv_k1, cv_k2, cv_k3, cv_k4], cv_kpi_data):
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value" style="color:{color}">{val}</div>
-                <div class="metric-label">{label}</div>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown("###")
-
-    # ── Tier breakdown by year ──
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown('<div class="section-header-red">Violations by Year and Tier</div>',
-                    unsafe_allow_html=True)
-        yearly_tier = cv.groupby(['year', 'tier_label']).size().reset_index()
-        yearly_tier.columns = ['Year', 'Tier', 'Count']
-        color_map_tier = {
-            'Structural / Critical': '#dc2626',
-            'Systems Failure':       '#f97316',
-            'Environmental Neglect': '#f59e0b'
-        }
-        fig_vt = px.bar(yearly_tier, x='Year', y='Count', color='Tier',
-                        color_discrete_map=color_map_tier, barmode='stack')
-        fig_vt.update_layout(height=380)
-        st.plotly_chart(fig_vt, use_container_width=True)
-        st.caption("📌 Annual violation counts split by severity tier. Growing bars mean physical decay is accelerating. Red tier (structural) growing fastest is the most alarming signal.")
-
-    with col2:
-        st.markdown('<div class="section-header-red">Tier Distribution</div>',
-                    unsafe_allow_html=True)
-        tier_counts = cv['tier_label'].value_counts()
-        fig_tp = px.pie(values=tier_counts.values, names=tier_counts.index,
-                        color=tier_counts.index,
-                        color_discrete_map=color_map_tier, hole=0.45)
-        fig_tp.update_layout(height=380)
-        st.plotly_chart(fig_tp, use_container_width=True)
-        st.caption("📌 Share of violations by tier. A large Environmental Neglect slice means visible disorder dominates — consistent with broken windows theory. A growing Structural slice means buildings are failing.")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.markdown('<div class="section-header-red">Top Zip Codes by Violation Count</div>',
-                    unsafe_allow_html=True)
-        cv_zip = cv['zip_code'].value_counts().head(8).reset_index()
-        cv_zip.columns = ['Zip Code', 'Count']
-        fig_cz = px.bar(cv_zip, x='Zip Code', y='Count',
-                        color='Count', color_continuous_scale='Reds')
-        fig_cz.update_layout(height=320, coloraxis_showscale=False)
-        st.plotly_chart(fig_cz, use_container_width=True)
-        st.caption("📌 Zip codes with the most physical decay violations. Consistent with crime and unfit/vacant hotspots — 13205, 13204, 13208 dominate all four datasets.")
-
-    with col4:
-        st.markdown('<div class="section-header-red">Top Neighborhoods by Violation Count</div>',
-                    unsafe_allow_html=True)
-        cv_nbr = cv['neighborhood'].value_counts().head(8).reset_index()
-        cv_nbr.columns = ['Neighborhood', 'Count']
-        fig_cn = px.bar(cv_nbr, x='Count', y='Neighborhood', orientation='h',
-                        color='Count', color_continuous_scale='Reds')
-        fig_cn.update_layout(yaxis={'categoryorder': 'total ascending'},
-                              height=320, coloraxis_showscale=False)
-        st.plotly_chart(fig_cn, use_container_width=True)
-        st.caption("📌 Northside, Brighton, and Near Westside lead — the same neighborhoods that dominate the crime heatmap and vacant property analysis. Four independent datasets pointing at the same geography.")
-
-    # ── Granger Causality with CV ──
-    st.divider()
-    st.markdown("### 📈 Granger Causality — Code Violations ↔ Crime (108 Months)")
-    st.caption(
-        "This is the upgraded Granger test using 92,790 code violations across 108 months (2017–2026) "
-        "instead of the 264 unfit violations across 24 months. Tested in BOTH directions. "
-        "108 monthly data points gives this test genuine statistical power."
-    )
-
-    with st.expander("ℹ️ What does bidirectional Granger testing tell us?"):
-        st.markdown("""
-        **Violations → Crime:** If past months of high violation counts predict future crime increases,
-        physical decay is the leading signal. This supports targeted property intervention as crime prevention.
-
-        **Crime → Violations:** If past months of high crime predict future violation increases,
-        crime may be driving abandonment and neglect — residents leave, landlords stop maintaining,
-        buildings deteriorate. This is the reverse causation the project thesis acknowledges honestly.
-
-        **Both significant:** A feedback loop — each accelerates the other. The most dangerous
-        condition, and the justification for simultaneous intervention in Type A zones.
-
-        **Neither significant:** The relationship may be contemporaneous (same month, not lagged)
-        or driven by a shared underlying cause like poverty or disinvestment.
-        """)
-
-    gc_cv_results, gc_cv_sig, gc_cv_ts, gc_cv_interpretation = get_granger_cv(crime, cv)
-    st.info(f"**Result:** {gc_cv_interpretation}")
-
-    if gc_cv_results is not None:
-        gc1, gc2 = st.columns(2)
-        with gc1:
-            fig_gcv = fig_granger_cv_pvalues(gc_cv_results)
-            if fig_gcv:
-                st.plotly_chart(fig_gcv, use_container_width=True)
-                st.caption("📌 Bars below the red line = statistically significant. Orange bars = violations predict crime. Blue bars = crime predicts violations. Green = significant in that direction.")
-        with gc2:
-            fig_gcv_ts = fig_granger_cv_timeseries(gc_cv_ts)
-            if fig_gcv_ts:
-                st.plotly_chart(fig_gcv_ts, use_container_width=True)
-                st.caption("📌 Monthly crime (orange) vs code violations (red dotted) over 9 years. If violation spikes visually precede crime spikes, it supports the causal direction.")
-
-        with st.expander("📊 Full Granger Results Table — Both Directions"):
-            st.dataframe(gc_cv_results, use_container_width=True)
-
-    st.error(
-        "🔴 **Key upgrade from unfit-only Granger test:** 108 months of data vs 24 months. "
-        "Results here are statistically reliable. The direction of causality shown above "
-        "is the most honest answer the data can give about whether decay precedes crime."
-    )
-# ── Tab 6 — Map ────────────────────────────────────────────────────────────────
-with tab6:
-    st.caption("All three datasets plotted on a single interactive map. Use the layer control in the top-right corner to show or hide each layer.")
-
-    with st.expander("ℹ️ How to read this map"):
-        st.markdown("""
-        - **Orange/red heatmap** — Crime density across all years. Brighter = more crimes in that area.
-        - **Red dots** — Open unfit property violations. Currently cited as unsafe and not yet fixed.
-        - **Gray dots** — Closed unfit violations. The property was remediated.
-        - **Blue heatmap** — Vacant property density. Brighter blue = more vacant properties clustered in that area.
-        - **Where to look:** Find spots where the orange crime heatmap, red unfit dots, and blue vacant heatmap all overlap. Those intersections are the city's highest-priority intervention zones.
-        """)
-
-    st.markdown('<div class="section-header">Crime Heatmap + Urban Decay Locations</div>', unsafe_allow_html=True)
-    st_folium(build_map(crime_2024, unfit_clean, vacant), width=1100, height=580)
-    st.success("🗺️ Areas where red unfit markers and blue vacant density overlap with high crime heatmap intensity are Syracuse's highest-priority intervention zones — concentrated in the northwest and southwest corridors.")
-
-# ── Tab 7 — Prediction ─────────────────────────────────────────────────────────
-with tab7:
-    st.caption("Two prediction approaches: a linear forecast of future unfit violations, and a Random Forest model that predicts high-severity crime risk from decay and temporal features.")
-
-    st.markdown("### 📉 Unfit Violation Forecast (Linear Trend)")
-
-    with st.expander("ℹ️ How does the linear forecast work?"):
-        st.markdown("""
-        We fit a linear regression to annual unfit violation counts from 2014–2024 and project forward to 2027.
-        This is a conservative estimate — actual growth has been exponential recently, so reality may be worse.
-        The value is in showing the city what happens if nothing changes.
-        """)
-
-    fig_pred, years, preds = fig_prediction(unfit)
-    st.plotly_chart(fig_pred, use_container_width=True)
-    st.caption("📌 Orange bars = actual counts per year. Red dashed line = linear projection. The 3 cards below show predicted new violations for each upcoming year.")
-
-    c1, c2, c3 = st.columns(3)
-    for col, yr, pred in zip([c1, c2, c3], years, preds):
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">{pred}</div>
-                <div class="metric-label">Predicted violations in {yr}</div>
-            </div>""", unsafe_allow_html=True)
-
-    st.divider()
-
-    st.markdown("### 🌲 Random Forest — Predicting High-Severity Crime Risk")
-    st.caption("A Random Forest classifier trained on the full crime dataset to predict whether a crime will be high-severity (SEVERITY ≥ 3). Features include time of day, season, day of week, and whether the crime occurred near urban decay points.")
-
-    with st.expander("ℹ️ How does the Random Forest work?"):
-        st.markdown("""
-        **What it learns:** Trained on 75% of all crime records, tested on 25%. For each crime it sees hour, month, season, day of week, weekend flag, and whether the location is near unfit properties, vacant properties, or both.
-
-        **What it predicts:** Whether that crime will be high-severity (SEVERITY ≥ 3 — assault, robbery, burglary, and above).
-
-        **Why it matters:** If `near_unfit`, `near_vacant`, or `near_decay` rank high in feature importance, proximity to decay is a genuine predictor of serious crime — directly validating that urban decay and crime severity are linked.
-
-        **Class balancing:** `class_weight='balanced'` prevents the model from always predicting the majority class.
-        """)
-
-    rf_model, importance_df, accuracy, cm, report, feature_names = get_rf(crime_2024)
-
-    r1, r2, r3, r4 = st.columns(4)
-    rf_kpi_data = [
-        ("Model Accuracy",          f"{accuracy}%",                                "#22c55e"),
-        ("High Severity F1",        f"{report['High Severity']['f1-score']:.2f}",  "#f97316"),
-        ("High Severity Recall",    f"{report['High Severity']['recall']:.2f}",    "#3b82f6"),
-        ("High Severity Precision", f"{report['High Severity']['precision']:.2f}", "#7c3aed"),
-    ]
-    for col, (label, val, color) in zip([r1, r2, r3, r4], rf_kpi_data):
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value" style="color:{color}">{val}</div>
-                <div class="metric-label">{label}</div>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown("###")
-
-    st.markdown('<div class="section-header">Feature Importance — What Predicts High-Severity Crime?</div>', unsafe_allow_html=True)
-    st.plotly_chart(fig_rf_feature_importance(importance_df), use_container_width=True)
-    st.caption("📌 Longer bar = more important feature. Red bars are decay/spatial features — if they rank highly, proximity to urban decay is a genuine predictor of crime severity. Orange = time-of-day, amber = seasonal.")
-
-    rf_col1, rf_col2 = st.columns(2)
-    with rf_col1:
-        st.markdown('<div class="section-header">Confusion Matrix</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_rf_confusion_matrix(cm), use_container_width=True)
-        st.caption("📌 Rows = actual class, columns = predicted. Top-left and bottom-right are correct predictions.")
-    with rf_col2:
-        st.markdown('<div class="section-header">Precision, Recall & F1 by Class</div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_rf_metrics(report), use_container_width=True)
-        st.caption("📌 Precision = of all crimes predicted high-severity, how many actually were. Recall = of all actual high-severity crimes, how many did we catch. F1 balances both.")
-
-    st.error("📈 If current trends continue, Syracuse could see **100+ new violations per year** through 2027, compounding the backlog of already-open cases.")
-    st.markdown("---")
-    st.markdown("### 🎯 Policy Recommendations")
-    st.markdown("""
-    **Type A Zones (Crime-Blight Feedback) — 13204, 13205, 13208:**
-    Simultaneous housing intervention AND targeted policing. Fixing one without the other breaks only half the cycle.
-
-    **Type B Zones (Economic Abandonment):**
-    Investment programs, ownership enforcement, vacancy rehabilitation. Do NOT increase policing — crime is not the driver here.
-
-    **Type C Zones (Infrastructure Decay):**
-    Fast-track code enforcement and rehabilitation funding. These violations are structural, not criminal.
-
-    **City-wide:**
-    1. Fast-track the 73% of unfit violations still Open — faster resolution reduces the crime proximity effect
-    2. Address the vacant property crisis — 88% active rate across 1,615 properties dwarfs the unfit problem in scale
-    3. Target Brighton, Northside, and Near Westside for neighborhood investment programs
-    4. Increase enforcement capacity — violations are growing 33x faster than closures, a systemic gap
-    """)
+with tab1: tab_crime.render(crime)
+with tab2: tab_unfit.render(unfit)
+with tab3: tab_vacant.render(vacant)
+with tab4: tab_decay_index.render(crime, decay, unfit)
+with tab5: tab_code_violations.render(crime, cv)
+with tab6: tab_map.render(crime, unfit_clean, vacant)
+with tab7: tab_prediction.render(unfit, crime)
