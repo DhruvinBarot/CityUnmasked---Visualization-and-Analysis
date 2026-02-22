@@ -95,19 +95,19 @@ st.divider()
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📊 Crime Analysis",
+    "⚠️ Code Violations",
     "🏚️ Unfit Properties",
     "🏘️ Vacant Properties",
+    "📊 Crime Analysis",
     "📉 Urban Decay Index",
-    "⚠️ Code Violations",
     "🗺️ Map",
     "🔮 Prediction"
 ])
 
-with tab1: tab_crime.render(crime)
+with tab1: tab_code_violations.render(crime, cv)
 with tab2: tab_unfit.render(unfit)
 with tab3: tab_vacant.render(vacant)
-with tab4: tab_decay_index.render(crime, decay, unfit)
-with tab5: tab_code_violations.render(crime, cv)
+with tab4: tab_crime.render(crime)
+with tab5: tab_decay_index.render(crime, decay, unfit)
 with tab6: tab_map.render(crime, unfit_clean, vacant)
 with tab7: tab_prediction.render(unfit, crime)
