@@ -1,92 +1,145 @@
 import streamlit as st
-from analysis.unfit import fig_prediction
-from analysis.models import (
-    run_random_forest, fig_rf_feature_importance, fig_rf_metrics
-)
+from streamlit_folium import st_folium
+
+from analysis.crime_risk_dev import run_hotspot_model
+
+@st.cache_data
+def get_hotspot_results():
+    """Train hotspot model once and cache results for the session."""
+    return run_hotspot_model()
 
 
 def render(unfit, crime):
-    st.caption("Linear violation forecast through 2027 and a Random Forest model predicting high-severity crime risk from decay and temporal features.")
+    """
+    Prediction tab: multi-year hotspot model built from crime_clean (2023–2025).
 
-    # ── Linear forecast ──
-    st.markdown("### 📉 Unfit Violation Forecast (Linear Trend)")
-    with st.expander("ℹ️ How does the forecast work?"):
-        st.markdown("""
-        Linear regression fitted to annual unfit violation counts (2014–2024), projected to 2027.
-        Conservative estimate — actual growth has been exponential since 2021, so reality may be worse.
-        The value: showing the city the cost of inaction in concrete numbers.
-        """)
+    We show:
+    - A risk heatmap over Syracuse
+    - Top 10 highest-risk grid cells
+    - Interpretation + policy recommendations
+    """
 
-    fig_pred, years, preds = fig_prediction(unfit)
-    st.plotly_chart(fig_pred, use_container_width=True)
-    st.caption("📌 Orange = actual counts. Red dashed = projection. If nothing changes, Syracuse is on course for 100+ new violations per year on top of the 187 already unresolved.")
+    st.caption(
+        "Multi-year spatio-temporal hotspot model using crime_clean (2023–2025). "
+        "For each year, we learn where October–December crime clusters will form "
+        "based on January–September patterns, then aggregate risk across years to "
+        "find persistent hotspots."
+    )
 
-    c1, c2, c3 = st.columns(3)
-    for col, yr, pred in zip([c1, c2, c3], years, preds):
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">{pred}</div>
-                <div class="metric-label">Predicted violations in {yr}</div>
-            </div>""", unsafe_allow_html=True)
+    # ── Run / load model ──
+    risk_map, top10 = get_hotspot_results()
+
+    # ── Map + table layout ──
+    st.markdown("### 🔥 Predicted Crime Hotspots (2023–2025)")
+
+    col_map, col_table = st.columns([2, 1])
+
+    with col_map:
+        st.markdown("**Risk Heatmap — Syracuse Grid (~400–500m cells)**")
+        st_folium(risk_map, width=900, height=600)
+        st.caption(
+            "Colors show the predicted probability that each 400–500m grid cell "
+            "becomes a crime cluster in Q4 (Oct–Dec). Red circles outline "
+            "chronic hotspot neighborhoods: Downtown (13202), Southside (13207), "
+            "Eastside / SU (13210), and Near Westside (13204). Blue dots mark the "
+            "top 10 highest-risk grid cells."
+        )
+
+    with col_table:
+        st.markdown("**Top 10 Highest-Risk Grid Cells**")
+
+        display = top10.copy()
+        display["risk_score"] = display["risk_score"].round(2)
+        display["avg_future_crimes"] = display["avg_future_crimes"].round(1)
+        display.insert(0, "Rank", range(1, len(display) + 1))
+
+        display.columns = [
+            "Rank",
+            "Lat Center",
+            "Lon Center",
+            "Risk Score",
+            "Avg Future Crimes (Oct–Dec)",
+        ]
+
+        st.dataframe(display, use_container_width=True)
+        st.caption(
+            "Risk Score ≈ modelled probability that this grid becomes a Q4 crime "
+            "cluster in a given year. Avg Future Crimes is the mean number of "
+            "crimes observed in those Q4 windows across 2023–2025."
+        )
+
+    st.divider()
+
+    # ── Interpretation ──
+    st.markdown("### 🔍 What the Model is Doing")
+
+    with st.expander("See the modelling logic in plain English"):
+        st.markdown(
+            """
+            **1. Space:**  
+            We snap every incident to a coarse latitude/longitude grid (~400–500m).  
+            Each grid cell becomes a small “block” of the city.
+
+            **2. Time:**  
+            For each year (2023, 2024, 2025), we split the data into:
+            - **History:** January–September  
+            - **Future:** October–December  
+
+            **3. Features (X):** per grid cell in Jan–Sep  
+            - Total crime count  
+            - Share of serious crimes (assault, robbery, burglary, etc.)  
+
+            **4. Label (y):** per grid cell in Oct–Dec  
+            - 1 = “cluster” if future crimes ≥ threshold  
+            - 0 = otherwise  
+
+            **5. Model:**  
+            Logistic Regression (class-balanced) learns the relationship between
+            historical intensity/seriousness and whether that cell turns into a Q4 cluster.
+
+            **6. Multi-year aggregation:**  
+            We repeat this for 2023, 2024, 2025 and average the predicted risk per grid.
+            Cells that are high-risk in multiple years emerge as **chronic hotspots**.
+            """
+        )
+
+    st.markdown("### 🧠 Key Takeaways")
+
+    st.markdown(
+        """
+        - **Risk is not uniform:** the model consistently concentrates high risk in:
+          - **Downtown (13202)**  
+          - **Southside (13207)**  
+          - **Eastside / SU (13210)**  
+          - **Near Westside (13204)**  
+
+        - **Chronic vs one-off:** by averaging risk across three years, we highlight
+          **structurally risky blocks**, not just single-year spikes.
+
+        - **Severity matters:** grids with a high share of serious crimes in Jan–Sep
+          are much more likely to become Q4 hotspots.
+        """
+    )
 
     st.divider()
 
-    # ── Random Forest ──
-    st.markdown("### 🌲 Random Forest — Predicting High-Severity Crime Risk")
-    with st.expander("ℹ️ How does the Random Forest work?"):
-        st.markdown("""
-        **What it learns:** Trained on 75% of all crime records, tested on 25%.
+    # ── Policy framing – tuned to these results ──
+    st.markdown("### 🎯 Policy Recommendations Based on the Hotspot Model")
 
-        **Features:** Hour, month, season, day of week, weekend flag, proximity to unfit/vacant/decay zones, and — new in Phase 2 — violation count within 100m, violation severity score, and critical structural violation flag.
+    st.markdown(
+        """
+        **Zone A – Crime–Blight Feedback Loops (Southside 13207, Near Westside 13204)**  
+        - Pair **housing repairs + vacancy remediation** with targeted violence-prevention.  
+        - Use the top-risk grids as priority blocks for inspections, lighting, and outreach.  
 
-        **What it predicts:** High-severity crime (SEVERITY ≥ 3 — assault, robbery, burglary, and above).
+        **Zone B – Economic & Institutional Centers (Downtown 13202, Eastside / SU 13210)**  
+        - Focus on **late-night safety** (lighting, transit, guardianship) and  
+          **code enforcement on chronically problematic parcels**.  
+        - Partner with anchor institutions (SU, hospitals, major employers) to co-fund interventions.  
 
-        **Why feature importance matters:** If decay/violation features rank highly, proximity to urban decay is a genuine predictor of serious crime — not a coincidence. This is the model-based validation of the project thesis.
-
-        **200 trees, class-balanced** to handle the majority-class imbalance in severity levels.
-        """)
-
-    model, importance_df, accuracy, cm, report = run_random_forest(crime)
-
-    r1, r2, r3, r4 = st.columns(4)
-    for col, (label, val, color) in zip([r1, r2, r3, r4], [
-        ("Model Accuracy",          f"{accuracy}%",                                "#22c55e"),
-        ("High Severity F1",        f"{report['High Severity']['f1-score']:.2f}",  "#f97316"),
-        ("High Severity Recall",    f"{report['High Severity']['recall']:.2f}",    "#3b82f6"),
-        ("High Severity Precision", f"{report['High Severity']['precision']:.2f}", "#7c3aed"),
-    ]):
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value" style="color:{color}">{val}</div>
-                <div class="metric-label">{label}</div>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown("###")
-    st.markdown('<div class="section-header">Feature Importance</div>', unsafe_allow_html=True)
-    st.plotly_chart(fig_rf_feature_importance(importance_df), use_container_width=True)
-    st.caption("📌 Red bars = decay/violation features. If these rank at the top, the model independently validates the thesis: proximity to urban decay predicts serious crime severity.")
-
-    st.markdown('<div class="section-header">Precision, Recall & F1</div>', unsafe_allow_html=True)
-    st.plotly_chart(fig_rf_metrics(report), use_container_width=True)
-    st.caption("📌 Precision = of all predicted high-severity, how many actually were. Recall = of all actual high-severity, how many did we catch. F1 balances both.")
-
-    st.divider()
-    st.markdown("### 🎯 Policy Recommendations")
-    st.markdown("""
-    **Type A Zones — Crime-Blight Feedback (13204, 13205, 13208):**
-    Simultaneous housing intervention AND targeted policing. Fixing one without the other breaks only half the cycle.
-
-    **Type B Zones — Economic Abandonment:**
-    Investment, ownership enforcement, vacancy rehabilitation. Do NOT increase policing — crime is not the driver.
-
-    **Type C Zones — Infrastructure Decay:**
-    Fast-track code enforcement and rehabilitation funding. These violations are structural, not criminal.
-
-    **City-wide priorities:**
-    - Fast-track the 73% of unfit violations still Open
-    - Address 1,421 active vacant properties — 88% unresolved rate is worse than unfit
-    - Target Brighton, Northside, Near Westside for concentrated investment
-    - Increase enforcement capacity — violations growing 33x faster than resolution
-    """)
+        **City-wide priorities informed by the model:**  
+        - Build a **hotspot list** of 10–20 grids that recur as high-risk and track quarterly metrics.  
+        - Tie **code enforcement, vacant property follow-up, and police patrol planning** to these grids.  
+        - Use year-over-year changes in risk scores as a way to monitor whether interventions are working.
+        """
+    )
