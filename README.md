@@ -265,9 +265,6 @@ Proactive inspections, lighting upgrades, and violence-prevention programs conce
 
 ---
 
-## 👥 Team
-
-> Add your team member names and GitHub handles here
 
 ---
 
